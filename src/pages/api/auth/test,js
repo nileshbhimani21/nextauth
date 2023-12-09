@@ -1,0 +1,129 @@
+import NextAuth from 'next-auth'
+import CredentialsProvider from 'next-auth/providers/credentials'
+import GoogleProvider from 'next-auth/providers/google'
+import AppleProvider from 'next-auth/providers/apple'
+import { SignJWT } from 'jose'
+import { createPrivateKey } from 'crypto'
+import { userLogin } from 'services/webservice/api'
+
+const getAppleToken = async () => {
+  const privateKey = `-----BEGIN PRIVATE KEY-----
+MIGTAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBHkwdwIBAQQg7Ioxv8VSHS9uJmmV
+MDRcipOmq+UWy1YvIP8rZGLuHvSgCgYIKoZIzj0DAQehRANCAATsJy9ky96ScTAl
+57gkXn4HAtORixZgzVCCVPd7/rPLyKx8nlVuNKrg45iLyhytq+gqshqrHHFVnkUf
+Uit01HJ/
+-----END PRIVATE KEY-----`
+  const token = new SignJWT({})
+    .setAudience('https://appleid.apple.com')
+    .setIssuer(process.env.APPLE_TEAM_ID as string)
+    .setIssuedAt(new Date().getTime() / 1000)
+    .setExpirationTime(new Date().getTime() / 1000 + 3600 * 2)
+    .setSubject(process.env.APPLE_ID as string)
+    .setProtectedHeader({
+      alg: 'ES256',
+      kid: process.env.APPLE_KEY_ID,
+    })
+    .sign(createPrivateKey(privateKey as string))
+  return token
+}
+
+export default NextAuth({
+  secret: process.env.NEXTAUTH_SECRET,
+  pages: {
+    signIn: '/',
+  },
+  providers: [
+    CredentialsProvider({
+      // The name to display on the sign-in form (e.g. 'Sign in with...')
+      name: 'Credentials',
+      // The credentials is used to generate a suitable form on the sign in page.
+      // You can specify whatever fields you are expecting to be submitted.
+      // e.g. domain, username, password, 2FA token, etc.
+      // You can pass any HTML attribute to the <input> tag through the object.
+      credentials: {
+        email: { label: 'Email', type: 'text', placeholder: 'john@example.com' },
+        // password: { label: 'Password', type: 'password' },
+      },
+      async authorize(credentials, req) {
+        // You need to provide your own logic here that takes the credentials
+        // submitted and returns either a object representing a user or value
+        // that is false/null if the credentials are invalid.
+        // e.g. return { id: 1, name: 'J Smith', email: 'jsmith@example.com' }
+        // You can also use the `req` object to obtain additional parameters
+        // (i.e., the request IP address)
+        if (credentials?.email) {
+          const data = JSON.parse(credentials.email)
+          return {
+            email: data.email,
+            name: data.display_name,
+            user_id: data.user_id,
+            auth_token: data.auth_token,
+            mobile_no: data.mobile_no,
+            isd_code: data.isd_code,
+            verified_status: data.verified_status,
+          }
+        }
+        // Return null if user data could not be retrieved
+        return null
+      },
+    }),
+    AppleProvider({
+      clientId: process.env.APPLE_ID || '',
+      clientSecret: await getAppleToken(),
+      // clientSecret: process.env.APPLE_SECRET || '',
+
+      authorization: {
+        params: {
+          redirect_uri: `${process.env.NEXTAUTH_URL}/api/auth/callback/apple`,
+        },
+      },
+    }),
+    GoogleProvider({
+      clientId: process.env.GOOGLE_ID || '',
+      clientSecret: process.env.GOOGLE_SECRET || '',
+      authorization: {
+        params: {
+          prompt: 'consent',
+          access_type: 'offline',
+          response_type: 'code',
+        },
+      },
+    }),
+  ],
+  callbacks: {
+    async session({ session, token }) {
+      return { ...session, user: token.user }
+    },
+    async jwt({ token, account, user, profile }) {
+      if (account?.provider === 'google' || account?.provider === 'apple') {
+        let newUser
+        let userData = { data: {} }
+        try {
+          userData = await userLogin({
+            loginType: 'email',
+            email: profile?.email,
+            accountId: profile?.sub,
+            password: '',
+            registerType: account.provider === 'google' ? '1' : '3',
+          })
+          newUser = false
+        } catch (err: any) {
+          newUser = true
+        }
+        return {
+          ...token,
+          user: {
+            ...user,
+            ...userData.data,
+            provider: account.provider,
+            newUser,
+            profile,
+            registeredVia: account.provider === 'google' ? '1' : '3',
+          },
+        }
+      }
+      if (user) return { ...token, user }
+      return token
+    },
+  },
+})
